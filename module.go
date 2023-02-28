@@ -1,6 +1,7 @@
 package mahimahi
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,7 +38,7 @@ func (MahiMahi) CaddyModule() caddy.ModuleInfo {
 func (m MahiMahi) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	// w.Write([]byte(fmt.Sprintf("recording: %s, working: %s, replayshell: %s", m.RecordingDir, m.WorkingDir, m.ReplayServerBin)))
 	m.w.Write([]byte(fmt.Sprintf("Got a request %v\n", r.RemoteAddr)))
-	cmd := exec.Command("/bin/sh", "-c", m.ReplayServerBin)
+	cmd := exec.Command(m.ReplayServerBin)
 	cmd.Env = append(cmd.Env,
 		"MAHIMAHI_CHDIR="+m.WorkingDir,
 		"MAHIMAHI_RECORD_PATH="+m.RecordingDir,
@@ -54,23 +55,52 @@ func (m MahiMahi) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 	// TODO: set this based on is HTTPS is actually used
 	cmd.Env = append(cmd.Env, "HTTPS=1")
-	err := cmd.Start()
+	fmt.Printf("%v\n", cmd.Env)
+	cmd_stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("error stdoutpipe: %v", err)
+	}
+
+	err = cmd.Start()
 	if err != nil {
 		return fmt.Errorf("error running replayshell command: %v", err)
 	}
-	w.Write([]byte(fmt.Sprintf("%v\n", cmd.Env)))
+
+	fmt.Printf("starting read loop\n")
+
+	cmd_stdout_buf := bufio.NewReader(cmd_stdout)
+	res, err := http.ReadResponse(cmd_stdout_buf, nil)
+	if err != nil {
+		return fmt.Errorf("error parsing http response from replay server: %v", err)
+	}
+
+	w.WriteHeader(res.StatusCode)
+	for name, values := range r.Header {
+		for _, value := range values {
+			w.Header().Set(name, value)
+		}
+	}
+
 	buf := make([]byte, 8192)
 
 	for {
-		n_read, err := cmd.Stdin.Read(buf)
+		n_read, err := res.Body.Read(buf)
 		if err != nil {
-			return fmt.Errorf("error reading from cmd: %v", err)
+			return fmt.Errorf("error reading from body: %v", err)
 		}
-		w.Write(buf[:n_read])
+		fmt.Printf("Read %v from body\n", n_read)
+
+		//fmt.Printf("read %v", buf[:n_read])
+		wrote, err := w.Write(buf[:n_read])
+		if err != nil {
+			return fmt.Errorf("error writing to stream")
+		}
+		fmt.Printf("wrote %v\n", wrote)
 		if n_read != 8192 {
 			break
 		}
 	}
+
 	return nil
 }
 
